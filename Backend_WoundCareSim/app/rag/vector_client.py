@@ -1,25 +1,50 @@
-from typing import List, Dict
+from typing import List
+from openai import OpenAI
+
+from app.core.config import OPENAI_API_KEY, VECTOR_STORE_ID
 
 class VectorClient:
     """
-    Week-2 dummy vector client.
-    This will be replaced with a real vector store client (e.g., Pinecone, ChromaDB).
+    Handles ONLY OpenAI Vector Store file management.
+    No querying logic lives here.
     """
-    async def query(self, query_text: str, scenario_id: str, step: str) -> List[Dict]:
-        """
-        Returns static fake chunks for testing.
-        No external API calls. No embeddings.
-        """
-        # Minimal fake content chunk representing RAG output
-        return [
-            {
-                "content": f"Dummy RAG context for query='{query_text}', scenario='{scenario_id}', step='{step}'.",
-                "metadata": {
-                    "scenario_id": scenario_id,
-                    "step": step,
-                    "source": "week2_stub"
-                }
-            }
-        ]
 
-query_vectorstore = VectorClient().query # for backward compatibility if needed
+    def __init__(self):
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY not configured")
+
+        if not VECTOR_STORE_ID:
+            raise RuntimeError("VECTOR_STORE_ID not configured")
+
+        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.vector_store_id = VECTOR_STORE_ID
+
+    async def upload_file(self, scenario_id: str, file_path: str) -> str:
+        """
+        Upload a document to OpenAI and attach it to the vector store.
+        OpenAI performs chunking + embedding automatically.
+        """
+
+        file_obj = await self.client.files.create(
+            file=open(file_path, "rb"),
+            purpose="assistants",
+            metadata={
+                "scenario_id": scenario_id
+            }
+        )
+
+        await self.client.vector_stores.files.create(
+            vector_store_id=self.vector_store_id,
+            file_id=file_obj.id
+        )
+
+        return file_obj.id
+
+    async def delete_file(self, file_id: str):
+        """
+        Remove file and its embeddings from the vector store.
+        """
+        await self.client.vector_stores.files.delete(
+            vector_store_id=self.vector_store_id,
+            file_id=file_id
+        )

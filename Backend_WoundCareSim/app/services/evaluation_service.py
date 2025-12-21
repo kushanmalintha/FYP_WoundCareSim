@@ -9,7 +9,7 @@ class EvaluationService:
     Orchestrates evaluation workflow:
     1. Prepares agent context (transcript, RAG, scenario metadata)
     2. Coordinates agent evaluation results
-    3. Returns structured feedback for session management
+    3. Returns structured feedback for session management and student guidance
     """
     
     def __init__(self, retriever: Retriever, scenario_loader: ScenarioLoader):

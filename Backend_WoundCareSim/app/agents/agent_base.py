@@ -1,23 +1,25 @@
 from abc import ABC
-from typing import Optional
-
-from openai import OpenAI
+import logging
+from openai import AsyncOpenAI
 
 from app.core.config import (
     OPENAI_API_KEY,
     OPENAI_CHAT_MODEL,
 )
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class BaseAgent(ABC):
     """
     Base class for all evaluator agents.
-    Handles ONLY LLM execution.
-    No RAG, no scoring, no state logic.
+    Uses Chat Completions with JSON Mode for reliable structured output.
     """
 
     def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        # Initialize Async Client
+        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY)
         self.model = OPENAI_CHAT_MODEL
 
     async def run(
@@ -27,39 +29,28 @@ class BaseAgent(ABC):
         temperature: float = 0.2,
     ) -> str:
         """
-        Executes an OpenAI Responses API call.
-
-        Args:
-            system_prompt: Instructions defining evaluator role & constraints
-            user_prompt: Concrete evaluation task + context
-            temperature: Low temperature for deterministic evaluation
-
-        Returns:
-            Raw assistant text (structured, but not parsed here)
+        Executes an OpenAI Chat Completion call with JSON Mode enforced.
         """
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                response_format={"type": "json_object"}, 
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+            )
 
-        response = self.client.responses.create(
-            model=self.model,
-            input=[
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
-            temperature=temperature,
-        )
+            # Extract content directly
+            output_text = response.choices[0].message.content
 
-        # Extract assistant text safely
-        output_text = ""
+            if not output_text:
+                raise ValueError("OpenAI returned empty content.")
 
-        for item in response.output:
-            if item["type"] == "message":
-                for content in item["content"]:
-                    if content["type"] == "output_text":
-                        output_text += content["text"]
+            return output_text
 
-        return output_text.strip()
+        except Exception as e:
+            logger.error(f"LLM Call Failed: {e}")
+            # Return an empty JSON object as a fallback string to prevent crashes
+            return "{}"

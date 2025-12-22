@@ -1,0 +1,28 @@
+{
+  "scenario_id": "scenario_test_001",
+  "scenario_title": "Post-operative Surgical Wound Care",
+  "patient_history": "The patient underwent minor surgery on the left forearm two days ago.",
+  "wound_details": "Clean surgical incision with intact sutures and no discharge.",
+  "required_conversation_points": [
+    "Introduce self",
+    "Confirm identity",
+    "Explain procedure",
+    "Obtain consent"
+  ],
+  "assessment_questions": [
+    {
+      "question": "Is the wound infected?",
+      "options": ["Yes", "No"],
+      "correct_answer": "No"
+    }
+  ],
+  "evaluation_criteria": {
+    "HISTORY": ["Identity verification", "Consent", "Empathy"],
+    "ASSESSMENT": ["Correct wound observation"],
+    "CLEANING": ["Hand hygiene", "Aseptic technique"],
+    "DRESSING": ["Correct dressing application"]
+  },
+  "vector_store_namespace": "scenario_test_001",
+  "created_by": "manual_test",
+  "created_at": "2025-01-01"
+}

@@ -1,5 +1,6 @@
+import json
 from app.agents.agent_base import BaseAgent
-
+from app.utils.schema import EvaluatorResponse
 
 class ClinicalAgent(BaseAgent):
     """
@@ -12,63 +13,67 @@ class ClinicalAgent(BaseAgent):
 
     async def evaluate(
         self,
-        *,
         current_step: str,
         student_input: str,
         scenario_metadata: dict,
         rag_response: str,
-    ) -> str:
+    ) -> EvaluatorResponse:
         """
-        Evaluate clinical and procedural correctness based on student input.
-        Returns structured natural-language feedback.
+        Evaluate clinical correctness and return a structured object.
         """
 
         system_prompt = (
             "You are a nursing clinical skills evaluator.\n"
             "Your role is to evaluate ONLY clinical and procedural correctness.\n\n"
+            "You MUST respond with valid JSON matching this structure:\n"
+            "{\n"
+            '  "agent_name": "ClinicalAgent",\n'
+            '  "step": "Current Step Name",\n'
+            '  "strengths": ["List of correctly performed clinical actions..."],\n'
+            '  "issues_detected": ["List of clinical errors or unsafe actions..."],\n'
+            '  "explanation": "Detailed clinical reasoning prioritizing patient safety...",\n'
+            '  "verdict": "Appropriate" | "Partially Appropriate" | "Inappropriate",\n'
+            '  "confidence": 0.0 to 1.0\n'
+            "}\n\n"
             "Strict Rules:\n"
-            "- Do NOT evaluate communication style or empathy.\n"
-            "- Do NOT evaluate theoretical nursing knowledge.\n"
-            "- Do NOT assume actions that were not explicitly stated.\n"
-            "- Only evaluate actions relevant to the CURRENT STEP.\n"
+            "- Output RAW JSON only. No markdown formatting.\n"
+            "- Do NOT evaluate communication style.\n"
             "- Prioritize patient safety above all else.\n"
         )
 
         user_prompt = (
-            f"CURRENT PROCEDURE STEP:\n"
-            f"{current_step}\n\n"
-
-            f"SCENARIO CONTEXT:\n"
-            f"Wound details:\n"
-            f"{scenario_metadata.get('wound_details', 'N/A')}\n\n"
-
-            f"CLINICAL EXPECTATIONS BY STEP:\n"
-            f"- HISTORY: no clinical actions expected\n"
-            f"- ASSESSMENT: conceptual awareness only\n"
-            f"- CLEANING: hand hygiene, aseptic technique, correct cleaning direction\n"
-            f"- DRESSING: appropriate dressing selection, protection, closure\n\n"
-
-            f"REFERENCE PROCEDURE CONTEXT:\n"
-            f"{rag_response}\n\n"
-
-            f"STUDENT INPUT (described actions or intentions):\n"
-            f"{student_input}\n\n"
-
-            f"EVALUATION INSTRUCTIONS:\n"
-            f"Evaluate ONLY the clinical correctness relevant to the CURRENT STEP.\n"
-            f"Do not penalize missing actions from future steps.\n"
-            f"Explicitly flag unsafe or incorrect actions if mentioned.\n\n"
-
-            f"Respond using EXACTLY the following structure:\n"
-            f"1. Correct Clinical Actions Identified:\n"
-            f"2. Clinical Errors or Unsafe Actions:\n"
-            f"3. Why This Matters for Patient Safety:\n"
-            f"4. Step Clinical Appropriateness (Appropriate / Partially Appropriate / Inappropriate):\n"
-            f"5. Confidence (0.0 to 1.0):\n"
+            f"CURRENT PROCEDURE STEP: {current_step}\n"
+            f"STUDENT INPUT: {student_input}\n"
+            f"SCENARIO CONTEXT (Wound): {scenario_metadata.get('wound_details', 'N/A')}\n"
+            f"CLINICAL EXPECTATIONS:\n"
+            f"- CLEANING: hand hygiene, aseptic technique, correct direction\n"
+            f"- DRESSING: appropriate selection, protection, closure\n"
+            f"REFERENCE GUIDELINES: {rag_response}\n"
         )
 
-        return await self.run(
+        raw_response = await self.run(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.2,
         )
+
+        try:
+            clean_json = raw_response.replace("```json", "").replace("```", "").strip()
+            response_data = json.loads(clean_json)
+            
+            # Enforce consistency
+            response_data["step"] = current_step
+            response_data["agent_name"] = "ClinicalAgent"
+
+            return EvaluatorResponse(**response_data)
+
+        except (json.JSONDecodeError, ValueError):
+            return EvaluatorResponse(
+                agent_name="ClinicalAgent",
+                step=current_step,
+                strengths=[],
+                issues_detected=["Error parsing clinical evaluation"],
+                explanation=f"Raw Output could not be parsed: {raw_response}",
+                verdict="Inappropriate",
+                confidence=0.0
+            )

@@ -1,0 +1,27 @@
+SCENARIO: Post-operative Surgical Wound Care
+SCENARIO_ID: scenario_test_001
+
+HISTORY TAKING GUIDELINES
+- Introduce yourself clearly to the patient
+- Verify patient identity using name and date of birth
+- Explain the wound care procedure before starting
+- Obtain verbal consent
+- Maintain empathetic and professional communication
+
+WOUND ASSESSMENT GUIDELINES
+- Observe wound for redness, swelling, discharge, or odor
+- A clean surgical wound should have intact sutures
+- Mild pain is expected; fever is not
+- Document findings accurately
+
+WOUND CLEANING GUIDELINES
+- Perform hand hygiene before touching the wound
+- Use aseptic technique
+- Clean from the center outward
+- Avoid contaminating sterile equipment
+
+DRESSING GUIDELINES
+- Select an appropriate sterile dressing
+- Maintain sterility throughout application
+- Secure dressing without excessive pressure
+- Inform patient after completing procedure

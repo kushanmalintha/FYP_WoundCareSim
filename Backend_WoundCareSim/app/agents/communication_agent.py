@@ -1,10 +1,11 @@
+import json
+import re
 from app.agents.agent_base import BaseAgent
-
+from app.utils.schema import EvaluatorResponse
 
 class CommunicationAgent(BaseAgent):
     """
-    Evaluates the student's communication quality during the procedure.
-    Focuses ONLY on communication behavior, not medical or procedural correctness.
+    Evaluates student communication and returns a structured EvaluatorResponse.
     """
 
     def __init__(self):
@@ -12,55 +13,70 @@ class CommunicationAgent(BaseAgent):
 
     async def evaluate(
         self,
-        *,
         current_step: str,
         student_input: str,
         scenario_metadata: dict,
         rag_response: str,
-    ) -> str:
-        """
-        Evaluate communication based on the current procedural step.
-        Returns structured natural language (not parsed here).
-        """
-
+    ) -> EvaluatorResponse:
+        
+        # 1. Update Prompt to FORCE JSON output matching your Schema
         system_prompt = (
             "You are a nursing communication evaluator.\n"
-            "Your task is to evaluate ONLY the student's communication skills.\n\n"
+            "Your task is to evaluate ONLY the student's communication skills.\n"
+            "You MUST respond with valid JSON matching this structure:\n"
+            "{\n"
+            '  "agent_name": "CommunicationAgent",\n'
+            '  "step": "Current Step Name",\n'
+            '  "strengths": ["List of strengths..."],\n'
+            '  "issues_detected": ["List of issues..."],\n'
+            '  "explanation": "Detailed reasoning...",\n'
+            '  "verdict": "Appropriate" | "Partially Appropriate" | "Inappropriate",\n'
+            '  "confidence": 0.0 to 1.0\n'
+            "}\n\n"
             "Rules:\n"
-            "- Do NOT evaluate medical knowledge.\n"
-            "- Do NOT evaluate procedural or clinical steps.\n"
-            "- Do NOT invent facts not present in the context.\n"
-            "- Base your reasoning only on the provided scenario and student input.\n"
-            "- Be concise, professional, and objective.\n"
-            "- If communication is appropriate, say so clearly.\n"
+            "- Do NOT include markdown formatting like ```json ... ```\n"
+            "- Output RAW JSON only.\n"
         )
 
         user_prompt = (
-            f"CURRENT PROCEDURE STEP:\n"
-            f"{current_step}\n\n"
-            f"SCENARIO CONTEXT:\n"
-            f"Patient history and context:\n"
-            f"{scenario_metadata.get('patient_history', 'N/A')}\n\n"
-            f"EXPECTED COMMUNICATION FOCUS FOR THIS STEP:\n"
-            f"- HISTORY: greeting, self-introduction, patient identification, consent, empathy\n"
-            f"- ASSESSMENT: clear explanations, respectful questioning\n"
-            f"- CLEANING: explaining actions, reassurance, consent\n"
-            f"- DRESSING: professional explanation, reassurance, closure\n\n"
-            f"REFERENCE CONTEXT (if relevant):\n"
-            f"{rag_response}\n\n"
-            f"STUDENT SPOKEN INPUT:\n"
-            f"{student_input}\n\n"
-            f"INSTRUCTIONS:\n"
-            f"Evaluate the student's communication for the CURRENT STEP only.\n"
-            f"Respond using the following structure:\n\n"
-            f"- Strengths in communication\n"
-            f"- Issues or missing communication elements (if any)\n"
-            f"- Explanation (why this matters)\n"
-            f"- Confidence (0.0 to 1.0)\n"
+            f"CURRENT PROCEDURE STEP: {current_step}\n"
+            f"STUDENT INPUT: {student_input}\n"
+            f"SCENARIO CONTEXT: {scenario_metadata.get('patient_history', 'N/A')}\n"
+            f"RAG CONTEXT: {rag_response}\n"
         )
 
-        return await self.run(
+        # 2. Get Raw Text from LLM
+        raw_response = await self.run(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.2,
         )
+
+        # 3. Parse and Validate
+        try:
+            # Clean up potential markdown code blocks (common LLM habit)
+            clean_json = raw_response.replace("```json", "").replace("```", "").strip()
+            
+            # Parse JSON string to Dictionary
+            response_data = json.loads(clean_json)
+            
+            # Ensure 'step' and 'agent_name' are set correctly if LLM hallucinates them
+            response_data["step"] = current_step
+            response_data["agent_name"] = "CommunicationAgent"
+
+            # Validate against Pydantic Schema
+            structured_output = EvaluatorResponse(**response_data)
+            
+            return structured_output
+
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"JSON Parsing failed: {e}. Raw: {raw_response}")
+            return EvaluatorResponse(
+                agent_name="CommunicationAgent",
+                step=current_step,
+                strengths=[],
+                issues_detected=["Error parsing evaluator response"],
+                explanation=f"Raw Output could not be parsed: {raw_response}",
+                verdict="Inappropriate",
+                confidence=0.0
+            )

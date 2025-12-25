@@ -2,13 +2,8 @@ from app.core.state_machine import Step, next_step
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-class SessionManager:
-    """
-    Tracks active sessions and their current step.
-    Week 2: stores sessions in memory.
-    Week 6: move to Firestore.
-    """
 
+class SessionManager:
     def __init__(self):
         self.sessions = {}
 
@@ -18,31 +13,27 @@ class SessionManager:
         student_id: str,
         scenario_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
-        """
-        Create a new session with enhanced metadata tracking.
-        
-        Args:
-            scenario_id: ID of the scenario being used
-            student_id: ID of the student
-            scenario_metadata: Full scenario metadata from Firestore
-            
-        Returns:
-            session_id: Unique session identifier
-        """
         session_id = f"sess_{len(self.sessions)+1}_{int(datetime.now().timestamp())}"
-        
+
         self.sessions[session_id] = {
             "scenario_id": scenario_id,
             "student_id": student_id,
             "current_step": Step.HISTORY.value,
+
+            
+            "attempt_count": {},              # per-step attempts
+            "last_evaluation": None,          # last coordinator output
+            "locked_step": False,             # unsafe lock flag
+
             "scenario_metadata": scenario_metadata or {},
             "logs": [],
-            "rag_results": [],  # Store RAG retrieval results for debugging
+            "rag_results": [],
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
-            "events": []  # Keep for backward compatibility
+            "events": []
         }
         return session_id
+
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -197,3 +188,52 @@ class SessionManager:
             del self.sessions[session_id]
             return True
         return False
+    def increment_attempt(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        step = session["current_step"]
+        session["attempt_count"][step] = session["attempt_count"].get(step, 0) + 1
+        session["updated_at"] = datetime.now().isoformat()
+
+    def reset_attempts(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        step = session["current_step"]
+        session["attempt_count"][step] = 0
+    def lock_current_step(self, session_id: str) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        session["locked_step"] = True
+        session["updated_at"] = datetime.now().isoformat()
+
+    def store_last_evaluation(
+        self, session_id: str, evaluation: Dict[str, Any]
+    ) -> None:
+        session = self.sessions.get(session_id)
+        if not session:
+            return
+
+        session["last_evaluation"] = evaluation
+        session["updated_at"] = datetime.now().isoformat()
+    def advance_step(self, session_id: str) -> Optional[str]:
+        session = self.sessions.get(session_id)
+        if not session or session.get("locked_step"):
+            return None
+
+        current_step = Step(session["current_step"])
+
+        try:
+            new_step = next_step(current_step)
+            session["current_step"] = new_step.value
+            session["locked_step"] = False
+            session["updated_at"] = datetime.now().isoformat()
+            return new_step.value
+        except Exception:
+            return None
+

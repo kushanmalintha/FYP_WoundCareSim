@@ -1,17 +1,8 @@
-<<<<<<< HEAD
 from typing import Dict, List, Any
 from app.services.scenario_loader import ScenarioLoader
 from app.rag.retriever import Retriever
 from app.core.coordinator import coordinate
 from app.services.session_manager import SessionManager
-=======
-from typing import Dict, Any, List
-
-from app.services.scenario_loader import load_scenario
-from app.rag.retriever import retrieve_with_rag
-from app.core.coordinator import Coordinator
-from app.utils.schema import EvaluatorResponse
->>>>>>> c82b935883eba8052e3a6572ae3e443e7a7f9ade
 
 
 class EvaluationService:
@@ -24,7 +15,6 @@ class EvaluationService:
     - Prepare agent context
     - Aggregate evaluator outputs (schema-driven)
     """
-<<<<<<< HEAD
     
     def __init__(
         self,
@@ -35,11 +25,6 @@ class EvaluationService:
         self.retriever = retriever
         self.scenario_loader = scenario_loader
         self.session_manager = session_manager
-=======
-
-    def __init__(self, coordinator: Coordinator):
-        self.coordinator = coordinator
->>>>>>> c82b935883eba8052e3a6572ae3e443e7a7f9ade
 
     async def prepare_agent_context(
         self,
@@ -82,7 +67,6 @@ class EvaluationService:
         - evaluator_outputs MUST already be schema-validated
         """
 
-<<<<<<< HEAD
     def get_readiness_threshold(self, step: str) -> float:
         """
         Retrieves progression threshold for a step.
@@ -145,15 +129,3 @@ class EvaluationService:
             "feedback": coordinator_output
         }
  
-=======
-        if not evaluator_outputs:
-            raise ValueError("No evaluator outputs provided")
-
-        if not all(isinstance(ev, EvaluatorResponse) for ev in evaluator_outputs):
-            raise TypeError("All evaluator outputs must be EvaluatorResponse instances")
-
-        return self.coordinator.aggregate(
-            evaluations=evaluator_outputs,
-            current_step=step
-        )
->>>>>>> c82b935883eba8052e3a6572ae3e443e7a7f9ade

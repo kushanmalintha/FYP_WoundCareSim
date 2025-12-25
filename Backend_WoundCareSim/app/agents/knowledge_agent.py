@@ -1,10 +1,12 @@
-from app.agents.agent_base import BaseAgent
+import json
 
+from pydantic_core import ValidationError
+from app.agents.agent_base import BaseAgent
+from app.utils.schema import EvaluatorResponse
 
 class KnowledgeAgent(BaseAgent):
     """
     Evaluates the student's nursing knowledge and clinical reasoning.
-    Focuses on cognitive correctness appropriate to the current step.
     """
 
     def __init__(self):
@@ -12,62 +14,68 @@ class KnowledgeAgent(BaseAgent):
 
     async def evaluate(
         self,
-        *,
         current_step: str,
         student_input: str,
         scenario_metadata: dict,
         rag_response: str,
-    ) -> str:
+    ) -> EvaluatorResponse:
         """
-        Evaluate nursing knowledge demonstrated by the student.
-        Returns structured natural-language feedback.
+        Evaluate nursing knowledge and return a structured object.
         """
 
         system_prompt = (
             "You are a nursing knowledge evaluator.\n"
             "Your task is to evaluate ONLY the student's nursing knowledge and reasoning.\n\n"
+            "You MUST respond with valid JSON matching this structure:\n"
+            "{\n"
+            '  "agent_name": "KnowledgeAgent",\n'
+            '  "step": "Current Step Name",\n'
+            '  "strengths": ["List of correct knowledge demonstrated..."],\n'
+            '  "issues_detected": ["List of knowledge gaps or errors..."],\n'
+            '  "explanation": "Why this knowledge matters clinically...",\n'
+            '  "verdict": "Appropriate" | "Partially Appropriate" | "Inappropriate",\n'
+            '  "confidence": 0.0 to 1.0\n'
+            "}\n\n"
             "Strict Rules:\n"
-            "- Do NOT evaluate communication style or politeness.\n"
-            "- Do NOT evaluate physical execution of procedures.\n"
-            "- Do NOT assume actions that were not stated.\n"
-            "- Base your reasoning ONLY on the student input and provided context.\n"
-            "- Be objective and clinically accurate.\n"
+            "- Output RAW JSON only. No markdown formatting.\n"
+            "- Do NOT evaluate physical execution (clinical skills).\n"
+            "- Do NOT evaluate politeness (communication).\n"
         )
 
         user_prompt = (
-            f"CURRENT PROCEDURE STEP:\n"
-            f"{current_step}\n\n"
-
-            f"SCENARIO CONTEXT:\n"
-            f"Patient history and relevant details:\n"
-            f"{scenario_metadata.get('patient_history', 'N/A')}\n\n"
-
-            f"KNOWLEDGE EXPECTATIONS BY STEP:\n"
-            f"- HISTORY: relevant history questions (pain, duration, infection signs, allergies)\n"
-            f"- ASSESSMENT: correct understanding of wound characteristics\n"
-            f"- CLEANING: conceptual understanding of sterile principles\n"
-            f"- DRESSING: understanding of dressing purpose and protection\n\n"
-
-            f"REFERENCE KNOWLEDGE CONTEXT (guidelines / procedure):\n"
-            f"{rag_response}\n\n"
-
-            f"STUDENT INPUT:\n"
-            f"{student_input}\n\n"
-
-            f"EVALUATION INSTRUCTIONS:\n"
-            f"Evaluate the nursing knowledge demonstrated ONLY for the CURRENT STEP.\n"
-            f"Do not penalize missing knowledge unrelated to this step.\n\n"
-
-            f"Respond using EXACTLY the following structure:\n"
-            f"1. Demonstrated Correct Knowledge:\n"
-            f"2. Knowledge Gaps or Errors:\n"
-            f"3. Why This Knowledge Matters Clinically:\n"
-            f"4. Step Knowledge Appropriateness (Adequate / Partially Adequate / Inadequate):\n"
-            f"5. Confidence (0.0 to 1.0):\n"
+            f"CURRENT PROCEDURE STEP: {current_step}\n"
+            f"STUDENT INPUT: {student_input}\n"
+            f"SCENARIO CONTEXT: {scenario_metadata.get('patient_history', 'N/A')}\n"
+            f"KNOWLEDGE EXPECTATIONS:\n"
+            f"- HISTORY: signs of infection, allergies, pain assessment\n"
+            f"- CLEANING: sterile principles vs clean technique\n"
+            f"REFERENCE GUIDELINES: {rag_response}\n"
         )
 
-        return await self.run(
+        raw_response = await self.run(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.2,
         )
+
+        try:
+            clean_json = raw_response.replace("```json", "").replace("```", "").strip()
+            response_data = json.loads(clean_json)
+            
+            response_data["step"] = current_step
+            response_data["agent_name"] = "KnowledgeAgent"
+
+            return EvaluatorResponse(**response_data)
+
+        # UPDATED EXCEPT BLOCK: Catch ValidationError
+        except (json.JSONDecodeError, ValueError, ValidationError) as e:
+            print(f"Agent Parsing Failed: {e}")
+            return EvaluatorResponse(
+                agent_name="CommunicationAgent",
+                step=current_step,
+                strengths=[],
+                issues_detected=["Error parsing evaluator response"],
+                explanation=f"Failed to parse LLM output. Raw: {raw_response[:50]}...",
+                verdict="Inappropriate",
+                confidence=0.0
+            )

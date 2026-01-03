@@ -66,3 +66,12 @@ class EvaluationService:
         )
 
         return coordinator_output
+    
+    def determine_input_type(self, payload: Dict[str, Any]) -> str:
+        if "action_type" in payload:
+            return "ACTION"
+        return "TEXT"
+    
+
+    
+    

@@ -1,9 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import base64
+import binascii
 
 from app.services.session_manager import SessionManager
 from app.services.evaluation_service import EvaluationService
+from app.services.groq_speech_service import GroqSpeechService
 from app.core.coordinator import Coordinator
 from app.core.state_machine import Step
 from app.services.action_event_service import ActionEventService
@@ -38,6 +41,7 @@ action_event_service = ActionEventService(session_manager)
 
 patient_agent = PatientAgent()
 conversation_manager = evaluation_service.conversation_manager
+speech_service = GroqSpeechService()
 
 communication_agent = CommunicationAgent()
 knowledge_agent = KnowledgeAgent()
@@ -70,6 +74,13 @@ class StaffNurseInput(BaseModel):
     message: str
 
 
+class AudioMessageInput(BaseModel):
+    session_id: str
+    audio_base64: str
+    audio_mime_type: Optional[str] = "audio/webm"
+    audio_filename: Optional[str] = None
+
+
 class MCQAnswerInput(BaseModel):
     session_id: str
     question_id: str
@@ -99,6 +110,23 @@ def is_action_already_performed(session: dict, action_type: str) -> bool:
     """
     action_events = session.get("action_events", [])
     return any(event["action_type"] == action_type for event in action_events)
+
+
+def _decode_audio_payload(payload: AudioMessageInput) -> tuple[bytes, str, str]:
+    filename = payload.audio_filename or "student_audio.webm"
+    mime_type = payload.audio_mime_type or "audio/webm"
+    try:
+        audio_bytes = base64.b64decode(payload.audio_base64)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid audio payload.") from exc
+    return audio_bytes, filename, mime_type
+
+
+async def _maybe_add_tts_audio(text: str) -> Optional[dict]:
+    try:
+        return await speech_service.synthesize_speech(text)
+    except Exception:
+        return None
 
 
 # -------------------------------------------------
@@ -177,7 +205,78 @@ async def send_message(payload: MessageInput):
         response
     )
 
-    return {"patient_response": response}
+    patient_response_audio = None
+    if session["current_step"] == Step.HISTORY.value:
+        patient_response_audio = await _maybe_add_tts_audio(response)
+
+    return {
+        "patient_response": response,
+        "patient_response_audio": patient_response_audio,
+    }
+
+
+@router.post("/message-audio")
+async def send_message_audio(payload: AudioMessageInput):
+    """
+    Voice-based student ↔ patient conversation.
+    HISTORY step only.
+    """
+    session = session_manager.get_session(payload.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session["current_step"] != Step.HISTORY.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Voice conversation allowed only during HISTORY step"
+        )
+
+    if not speech_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Groq speech service is not configured"
+        )
+
+    audio_bytes, filename, mime_type = _decode_audio_payload(payload)
+    try:
+        transcript = await speech_service.transcribe_audio(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            mime_type=mime_type,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Speech-to-text failed.") from exc
+
+    scenario_meta = session["scenario_metadata"]
+    patient_history = scenario_meta["patient_history"]
+
+    conversation_manager.add_turn(
+        payload.session_id,
+        Step.HISTORY.value,
+        "student",
+        transcript
+    )
+
+    response = await patient_agent.respond(
+        patient_history=patient_history,
+        conversation_history=conversation_manager.conversations[payload.session_id][Step.HISTORY.value],
+        student_message=transcript
+    )
+
+    conversation_manager.add_turn(
+        payload.session_id,
+        Step.HISTORY.value,
+        "patient",
+        response
+    )
+
+    patient_response_audio = await _maybe_add_tts_audio(response)
+
+    return {
+        "transcript": transcript,
+        "patient_response": response,
+        "patient_response_audio": patient_response_audio,
+    }
 
 
 @router.post("/staff-nurse")
@@ -229,8 +328,64 @@ async def ask_staff_nurse(payload: StaffNurseInput):
         next_step=next_step_str
     )
     
+    staff_nurse_response_audio = None
+    if current_step == Step.HISTORY.value:
+        staff_nurse_response_audio = await _maybe_add_tts_audio(response)
+
     return {
         "staff_nurse_response": response,
+        "staff_nurse_response_audio": staff_nurse_response_audio,
+        "current_step": current_step,
+        "is_verification": False
+    }
+
+
+@router.post("/staff-nurse-audio")
+async def ask_staff_nurse_audio(payload: AudioMessageInput):
+    """
+    Voice-based staff nurse guidance.
+    HISTORY step only.
+    """
+    session = session_manager.get_session(payload.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    current_step = session["current_step"]
+    if current_step != Step.HISTORY.value:
+        raise HTTPException(
+            status_code=400,
+            detail="Voice guidance allowed only during HISTORY step"
+        )
+
+    if not speech_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Groq speech service is not configured"
+        )
+
+    audio_bytes, filename, mime_type = _decode_audio_payload(payload)
+    try:
+        transcript = await speech_service.transcribe_audio(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            mime_type=mime_type,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Speech-to-text failed.") from exc
+
+    staff_nurse = StaffNurseAgent()
+    response = await staff_nurse.respond(
+        student_input=transcript,
+        current_step=current_step,
+        next_step=None
+    )
+
+    staff_nurse_response_audio = await _maybe_add_tts_audio(response)
+
+    return {
+        "transcript": transcript,
+        "staff_nurse_response": response,
+        "staff_nurse_response_audio": staff_nurse_response_audio,
         "current_step": current_step,
         "is_verification": False
     }
@@ -715,12 +870,20 @@ async def run_step(payload: StepInput):
             "mcq_result": evaluation.get("mcq_result")
         }
     
+    narrated_feedback = evaluation.get("narrated_feedback")
+    narrated_feedback_audio = None
+    if narrated_feedback and narrated_feedback.get("message_text"):
+        narrated_feedback_audio = await _maybe_add_tts_audio(
+            narrated_feedback.get("message_text")
+        )
+
     return {
         "session_id": payload.session_id,
         "current_step": current_step,
         "next_step": next_step,
         "feedback": {
-            "narrated_feedback": evaluation.get("narrated_feedback"),
+            "narrated_feedback": narrated_feedback,
+            "narrated_feedback_audio": narrated_feedback_audio,
             "score": evaluation.get("scores", {}).get("step_quality_indicator"),
             "interpretation": evaluation.get("scores", {}).get("interpretation")
         }

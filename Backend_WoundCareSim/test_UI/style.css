@@ -276,6 +276,49 @@ select:focus {
     flex: 1;
 }
 
+/* Voice Controls */
+.voice-controls {
+    margin-top: 16px;
+    padding: 15px;
+    background: var(--bg-secondary);
+    border-radius: var(--border-radius);
+    border: 1px dashed var(--border-color);
+}
+
+.voice-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.voice-status {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.voice-status.recording {
+    color: var(--danger-color);
+}
+
+.voice-buttons {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.voice-hint {
+    margin-top: 10px;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.audio-player {
+    margin-top: 8px;
+    width: 100%;
+}
+
 /* Main Content Layout */
 .main-content {
     display: grid;

@@ -12,6 +12,13 @@ let currentSession = {
     actionCounter: 0
 };
 
+let voiceState = {
+    recorder: null,
+    stream: null,
+    chunks: [],
+    activeTarget: null
+};
+
 // ==========================================
 // Utility Functions
 // ==========================================
@@ -71,6 +78,152 @@ async function apiCall(endpoint, method = 'GET', body = null) {
         throw error;
     } finally {
         hideLoading();
+    }
+}
+
+function isVoiceSupported() {
+    return !!(navigator.mediaDevices && window.MediaRecorder);
+}
+
+function resetVoiceStatus() {
+    if (!isVoiceSupported()) {
+        updateVoiceStatus('patient', 'Voice input not supported', false);
+        updateVoiceStatus('nurse', 'Voice input not supported', false);
+        const patientRecord = document.getElementById('patientRecordBtn');
+        const nurseRecord = document.getElementById('nurseRecordBtn');
+        if (patientRecord) patientRecord.disabled = true;
+        if (nurseRecord) nurseRecord.disabled = true;
+        const patientStop = document.getElementById('patientStopBtn');
+        const nurseStop = document.getElementById('nurseStopBtn');
+        if (patientStop) patientStop.disabled = true;
+        if (nurseStop) nurseStop.disabled = true;
+        return;
+    }
+
+    updateVoiceStatus('patient', 'Microphone idle', false);
+    updateVoiceStatus('nurse', 'Microphone idle', false);
+    toggleVoiceButtons('patient', false);
+    toggleVoiceButtons('nurse', false);
+}
+
+function updateVoiceStatus(target, message, isRecording) {
+    const statusId = target === 'patient' ? 'patientVoiceStatus' : 'nurseVoiceStatus';
+    const statusEl = document.getElementById(statusId);
+    if (!statusEl) return;
+    statusEl.textContent = message;
+    statusEl.classList.toggle('recording', Boolean(isRecording));
+}
+
+function toggleVoiceButtons(target, isRecording) {
+    const recordId = target === 'patient' ? 'patientRecordBtn' : 'nurseRecordBtn';
+    const stopId = target === 'patient' ? 'patientStopBtn' : 'nurseStopBtn';
+    const recordBtn = document.getElementById(recordId);
+    const stopBtn = document.getElementById(stopId);
+    if (!recordBtn || !stopBtn) return;
+    recordBtn.disabled = isRecording;
+    stopBtn.disabled = !isRecording;
+}
+
+async function startVoiceRecording(target) {
+    if (!isVoiceSupported()) {
+        updateVoiceStatus(target, 'Microphone unavailable in this browser', false);
+        showError('Voice input is not supported in this browser.');
+        return;
+    }
+
+    if (voiceState.recorder) {
+        showError('Recording already in progress.');
+        return;
+    }
+
+    try {
+        voiceState.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        voiceState.recorder = new MediaRecorder(voiceState.stream);
+        voiceState.chunks = [];
+        voiceState.activeTarget = target;
+
+        voiceState.recorder.ondataavailable = event => {
+            if (event.data && event.data.size > 0) {
+                voiceState.chunks.push(event.data);
+            }
+        };
+
+        voiceState.recorder.onstop = async () => {
+            const blob = new Blob(voiceState.chunks, { type: voiceState.recorder.mimeType });
+            await handleVoiceRecordingStop(target, blob);
+            cleanupVoiceRecording();
+        };
+
+        voiceState.recorder.start();
+        updateVoiceStatus(target, 'Recording...', true);
+        toggleVoiceButtons(target, true);
+    } catch (error) {
+        console.error('Failed to start recording:', error);
+        updateVoiceStatus(target, 'Microphone access denied', false);
+        showError('Unable to access the microphone. Please check permissions.');
+    }
+}
+
+function stopVoiceRecording(target) {
+    if (!voiceState.recorder || voiceState.activeTarget !== target) {
+        return;
+    }
+    updateVoiceStatus(target, 'Processing audio...', false);
+    toggleVoiceButtons(target, false);
+    voiceState.recorder.stop();
+}
+
+function cleanupVoiceRecording() {
+    if (voiceState.stream) {
+        voiceState.stream.getTracks().forEach(track => track.stop());
+    }
+    voiceState.stream = null;
+    voiceState.recorder = null;
+    voiceState.chunks = [];
+    voiceState.activeTarget = null;
+}
+
+async function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
+async function handleVoiceRecordingStop(target, blob) {
+    try {
+        const dataUrl = await blobToBase64(blob);
+        const base64 = dataUrl.split(',')[1];
+        const mimeType = blob.type || 'audio/webm';
+        const endpoint = target === 'patient' ? '/session/message-audio' : '/session/staff-nurse-audio';
+
+        const response = await apiCall(endpoint, 'POST', {
+            session_id: currentSession.sessionId,
+            audio_base64: base64,
+            audio_mime_type: mimeType
+        });
+
+        if (target === 'patient') {
+            addMessageToConversation('student', response.transcript, null, 'voice');
+            addMessageToConversation('patient', response.patient_response, response.patient_response_audio, 'voice');
+        } else {
+            const responseDiv = document.getElementById('staffNurseHistory');
+            responseDiv.innerHTML = `
+                <strong>You (voice):</strong>
+                <p>${response.transcript}</p>
+                <strong>Staff Nurse (Guidance):</strong>
+                <p>${response.staff_nurse_response}</p>
+                ${buildAudioPlayer(response.staff_nurse_response_audio)}
+            `;
+        }
+
+        updateVoiceStatus(target, 'Microphone idle', false);
+    } catch (error) {
+        console.error('Voice request failed:', error);
+        updateVoiceStatus(target, 'Voice failed - use text input', false);
+        showError('Voice input failed. Please use text input.');
     }
 }
 
@@ -138,6 +291,8 @@ function showHistoryStep() {
     // Clear conversation box
     const conversationBox = document.getElementById('conversationBox');
     conversationBox.innerHTML = '<div class="conversation-empty">Start by asking the patient a question...</div>';
+
+    resetVoiceStatus();
 }
 
 async function sendMessage() {
@@ -158,14 +313,26 @@ async function sendMessage() {
         });
         
         // Add patient response
-        addMessageToConversation('patient', response.patient_response);
+        addMessageToConversation('patient', response.patient_response, response.patient_response_audio);
         
     } catch (error) {
         console.error('Failed to send message:', error);
     }
 }
 
-function addMessageToConversation(speaker, text) {
+function buildAudioPlayer(audioPayload) {
+    if (!audioPayload || !audioPayload.audio_base64) {
+        return '';
+    }
+    const mimeType = audioPayload.audio_mime_type || 'audio/wav';
+    return `
+        <audio class="audio-player" controls src="data:${mimeType};base64,${audioPayload.audio_base64}">
+            Your browser does not support audio playback.
+        </audio>
+    `;
+}
+
+function addMessageToConversation(speaker, text, audioPayload = null, source = 'text') {
     const conversationBox = document.getElementById('conversationBox');
     
     // Remove empty state if present
@@ -174,12 +341,15 @@ function addMessageToConversation(speaker, text) {
         emptyState.remove();
     }
     
+    const sourceLabel = source === 'voice' ? ' (voice)' : '';
+
     // Create message element
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${speaker}`;
     messageDiv.innerHTML = `
-        <div class="message-speaker">${speaker === 'student' ? 'You' : 'Patient'}:</div>
+        <div class="message-speaker">${speaker === 'student' ? 'You' : 'Patient'}${sourceLabel}:</div>
         <div>${text}</div>
+        ${buildAudioPlayer(audioPayload)}
     `;
     
     conversationBox.appendChild(messageDiv);
@@ -459,6 +629,7 @@ async function askStaffNurse() {
             responseDiv.innerHTML = `
                 <strong>Staff Nurse (Guidance):</strong>
                 <p>${response.staff_nurse_response}</p>
+                ${buildAudioPlayer(response.staff_nurse_response_audio)}
             `;
         }
         
@@ -514,6 +685,15 @@ function displayHistoryFeedback(feedback) {
         html += `
             <div class="narrated-feedback">
                 ${feedback.narrated_feedback.message_text}
+            </div>
+        `;
+    }
+
+    if (feedback.narrated_feedback_audio && feedback.narrated_feedback_audio.audio_base64) {
+        html += `
+            <div class="narrated-feedback">
+                <strong>🔊 Narrated Audio:</strong>
+                ${buildAudioPlayer(feedback.narrated_feedback_audio)}
             </div>
         `;
     }
@@ -649,4 +829,5 @@ function showCompletionScreen() {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('VR Nursing Education System - Test UI Loaded (Updated)');
     showScreen('startScreen');
+    resetVoiceStatus();
 });

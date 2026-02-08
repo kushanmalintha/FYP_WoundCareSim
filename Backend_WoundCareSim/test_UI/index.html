@@ -89,6 +89,22 @@
                             Send
                         </button>
                     </div>
+                    
+                    <div class="voice-controls">
+                        <div class="voice-header">
+                            <span>🎙 Voice Input (optional)</span>
+                            <span class="voice-status" id="patientVoiceStatus">Microphone idle</span>
+                        </div>
+                        <div class="voice-buttons">
+                            <button class="btn btn-secondary" id="patientRecordBtn" onclick="startVoiceRecording('patient')">
+                                Start Recording
+                            </button>
+                            <button class="btn btn-warning" id="patientStopBtn" onclick="stopVoiceRecording('patient')" disabled>
+                                Stop & Send
+                            </button>
+                        </div>
+                        <p class="voice-hint">If voice input fails, use the text field above.</p>
+                    </div>
                 </div>
 
                 <!-- Staff Nurse -->
@@ -107,6 +123,21 @@
                         <button class="btn btn-secondary" onclick="askStaffNurse()">
                             Ask Nurse
                         </button>
+                    </div>
+                    <div class="voice-controls">
+                        <div class="voice-header">
+                            <span>🎙 Voice Input (optional)</span>
+                            <span class="voice-status" id="nurseVoiceStatus">Microphone idle</span>
+                        </div>
+                        <div class="voice-buttons">
+                            <button class="btn btn-secondary" id="nurseRecordBtn" onclick="startVoiceRecording('nurse')">
+                                Start Recording
+                            </button>
+                            <button class="btn btn-warning" id="nurseStopBtn" onclick="stopVoiceRecording('nurse')" disabled>
+                                Stop & Send
+                            </button>
+                        </div>
+                        <p class="voice-hint">If voice input fails, use the text field above.</p>
                     </div>
                 </div>
             </div>

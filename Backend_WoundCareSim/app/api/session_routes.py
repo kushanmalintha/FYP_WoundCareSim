@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+import base64
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 
@@ -17,6 +18,7 @@ from app.agents.staff_nurse_agent import StaffNurseAgent
 from app.agents.feedback_narrator_agent import FeedbackNarratorAgent
 
 from app.utils.mcq_evaluator import MCQEvaluator
+from app.services.groq_service import GroqService
 
 router = APIRouter(prefix="/session", tags=["Session"])
 
@@ -56,6 +58,7 @@ class StartSessionRequest(BaseModel):
 class MessageInput(BaseModel):
     session_id: str
     message: str
+    voice_mode: bool = False
 
 
 class StepInput(BaseModel):
@@ -68,6 +71,7 @@ class StepInput(BaseModel):
 class StaffNurseInput(BaseModel):
     session_id: str
     message: str
+    voice_mode: bool = False
 
 
 class MCQAnswerInput(BaseModel):
@@ -177,7 +181,21 @@ async def send_message(payload: MessageInput):
         response
     )
 
-    return {"patient_response": response}
+    audio_base64 = None
+    audio_error = None
+    if payload.voice_mode:
+        try:
+            audio_bytes = await GroqService.synthesize_speech(response)
+            audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+        except Exception as exc:
+            audio_error = str(exc)
+
+    return {
+        "patient_response": response,
+        "audio_base64": audio_base64,
+        "audio_mime_type": "audio/mpeg" if audio_base64 else None,
+        "audio_error": audio_error,
+    }
 
 
 @router.post("/staff-nurse")
@@ -207,11 +225,14 @@ async def ask_staff_nurse(payload: StaffNurseInput):
     
     if is_verification and current_step == Step.CLEANING_AND_DRESSING.value:
         # This is a verification request - handle as action
-        return await _handle_verification_as_action(
+        response = await _handle_verification_as_action(
             session=session,
             student_message=payload.message,
             material_type=material_type
         )
+        if payload.voice_mode:
+            response = await _attach_audio_response(response, "staff_nurse_response")
+        return response
     
     # Regular guidance request
     # Determine next step
@@ -229,11 +250,29 @@ async def ask_staff_nurse(payload: StaffNurseInput):
         next_step=next_step_str
     )
     
-    return {
+    response = {
         "staff_nurse_response": response,
         "current_step": current_step,
         "is_verification": False
     }
+    if payload.voice_mode:
+        response = await _attach_audio_response(response, "staff_nurse_response")
+    return response
+
+
+async def _attach_audio_response(response: dict, field_name: str) -> dict:
+    audio_base64 = None
+    audio_error = None
+    try:
+        audio_bytes = await GroqService.synthesize_speech(response[field_name])
+        audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+    except Exception as exc:
+        audio_error = str(exc)
+
+    response["audio_base64"] = audio_base64
+    response["audio_mime_type"] = "audio/mpeg" if audio_base64 else None
+    response["audio_error"] = audio_error
+    return response
 
 
 def _detect_verification_request(message: str) -> tuple[bool, str]:

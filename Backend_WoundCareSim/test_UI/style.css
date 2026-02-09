@@ -236,6 +236,135 @@ select:focus {
     color: white;
 }
 
+/* Voice Input */
+.voice-input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: flex-start;
+}
+
+.voice-button {
+    width: 100%;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+}
+
+.voice-button.recording {
+    background: #dc2626;
+    animation: pulse 1.2s infinite;
+}
+
+.voice-status {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+}
+
+.voice-waveform {
+    display: flex;
+    gap: 4px;
+    height: 18px;
+    align-items: flex-end;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.voice-waveform span {
+    width: 4px;
+    height: 6px;
+    background: var(--primary-color);
+    border-radius: 4px;
+    animation: wave 1s infinite ease-in-out;
+}
+
+.voice-waveform span:nth-child(2) {
+    animation-delay: 0.1s;
+}
+.voice-waveform span:nth-child(3) {
+    animation-delay: 0.2s;
+}
+.voice-waveform span:nth-child(4) {
+    animation-delay: 0.3s;
+}
+.voice-waveform span:nth-child(5) {
+    animation-delay: 0.4s;
+}
+
+.voice-waveform.active {
+    opacity: 1;
+}
+
+.voice-fallback {
+    display: flex;
+    width: 100%;
+    gap: 12px;
+}
+
+@keyframes pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.6);
+    }
+    70% {
+        box-shadow: 0 0 0 12px rgba(220, 38, 38, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+    }
+}
+
+@keyframes wave {
+    0%, 100% {
+        height: 6px;
+    }
+    50% {
+        height: 16px;
+    }
+}
+
+/* Audio Playback Indicators */
+.audio-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 8px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+}
+
+.audio-indicator .speaker-icon {
+    font-size: 1rem;
+}
+
+.audio-indicator.playing {
+    color: var(--primary-color);
+}
+
+.audio-indicator .bars {
+    display: inline-flex;
+    gap: 3px;
+}
+
+.audio-indicator .bars span {
+    width: 3px;
+    height: 8px;
+    background: var(--primary-color);
+    border-radius: 3px;
+    animation: wave 0.8s infinite ease-in-out;
+    opacity: 0.5;
+}
+
+.audio-indicator.playing .bars span {
+    opacity: 1;
+}
+
+/* Feedback audio controls */
+.audio-controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
 .btn-secondary:hover {
     background: var(--secondary-hover);
 }

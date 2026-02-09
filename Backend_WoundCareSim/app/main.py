@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.session_routes import router as session_router
 from app.api.scenario_routes import router as scenario_router
+from app.api.voice_routes import router as voice_router
 
 app = FastAPI(
     title="VR Nursing Education System Backend",
@@ -23,3 +24,4 @@ def health():
 
 app.include_router(session_router)
 app.include_router(scenario_router)
+app.include_router(voice_router)

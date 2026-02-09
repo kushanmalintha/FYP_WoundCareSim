@@ -12,6 +12,11 @@ let currentSession = {
     actionCounter: 0
 };
 
+let voiceRecorder = null;
+let audioPlayer = null;
+let feedbackAudio = null;
+let voiceControlsInitialized = false;
+
 // ==========================================
 // Utility Functions
 // ==========================================
@@ -71,6 +76,137 @@ async function apiCall(endpoint, method = 'GET', body = null) {
         throw error;
     } finally {
         hideLoading();
+    }
+}
+
+async function apiCallFormData(endpoint, formData) {
+    showLoading();
+    try {
+        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+            method: 'POST',
+            body: formData
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'API request failed');
+        }
+
+        return await response.json();
+    } catch (error) {
+        console.error('API Error:', error);
+        showError(error.message);
+        throw error;
+    } finally {
+        hideLoading();
+    }
+}
+
+// ==========================================
+// Voice Utilities
+// ==========================================
+
+class VoiceRecorder {
+    constructor(button, statusEl, waveformEl, fallbackEl) {
+        this.button = button;
+        this.statusEl = statusEl;
+        this.waveformEl = waveformEl;
+        this.fallbackEl = fallbackEl;
+        this.mediaRecorder = null;
+        this.chunks = [];
+        this.stream = null;
+        this.isRecording = false;
+    }
+
+    async init() {
+        if (!navigator.mediaDevices || !window.MediaRecorder) {
+            this.showFallback('Voice recording not supported in this browser.');
+            return;
+        }
+        this.statusEl.textContent = 'Ready to record';
+    }
+
+    showFallback(message) {
+        this.statusEl.textContent = message;
+        this.fallbackEl.style.display = 'flex';
+    }
+
+    async start() {
+        if (this.isRecording) return;
+        try {
+            if (!this.stream) {
+                this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            }
+            this.chunks = [];
+            this.mediaRecorder = new MediaRecorder(this.stream);
+            this.mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    this.chunks.push(event.data);
+                }
+            };
+            this.mediaRecorder.start();
+            this.isRecording = true;
+            this.button.classList.add('recording');
+            this.statusEl.textContent = 'Recording... release to send';
+            this.waveformEl.classList.add('active');
+        } catch (error) {
+            console.error('Recording error:', error);
+            this.showFallback('Microphone access failed. Use text input instead.');
+        }
+    }
+
+    async stop() {
+        if (!this.isRecording || !this.mediaRecorder) return null;
+        return new Promise((resolve) => {
+            this.mediaRecorder.onstop = () => {
+                const blob = new Blob(this.chunks, { type: this.mediaRecorder.mimeType });
+                this.isRecording = false;
+                this.button.classList.remove('recording');
+                this.statusEl.textContent = 'Transcribing...';
+                this.waveformEl.classList.remove('active');
+                resolve(blob);
+            };
+            this.mediaRecorder.stop();
+        });
+    }
+}
+
+class AudioPlayer {
+    constructor() {
+        this.activeAudio = null;
+        this.activeIndicator = null;
+    }
+
+    playBase64(base64, indicatorEl) {
+        if (!base64) return;
+        const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
+        this.stop();
+        this.activeAudio = audio;
+        this.activeIndicator = indicatorEl;
+        if (indicatorEl) {
+            indicatorEl.classList.add('playing');
+        }
+        audio.play().catch((error) => {
+            console.error('Audio playback error:', error);
+            if (indicatorEl) {
+                indicatorEl.classList.remove('playing');
+            }
+        });
+        audio.onended = () => {
+            if (indicatorEl) {
+                indicatorEl.classList.remove('playing');
+            }
+        };
+    }
+
+    stop() {
+        if (this.activeAudio) {
+            this.activeAudio.pause();
+            this.activeAudio.currentTime = 0;
+            if (this.activeIndicator) {
+                this.activeIndicator.classList.remove('playing');
+            }
+        }
     }
 }
 
@@ -138,34 +274,42 @@ function showHistoryStep() {
     // Clear conversation box
     const conversationBox = document.getElementById('conversationBox');
     conversationBox.innerHTML = '<div class="conversation-empty">Start by asking the patient a question...</div>';
+
+    initializeVoiceControls();
 }
 
-async function sendMessage() {
+async function sendMessage(messageOverride = null, options = {}) {
     const input = document.getElementById('patientQuestion');
-    const message = input.value.trim();
-    
+    const message = messageOverride || input?.value.trim();
+    const voiceMode = options.voiceMode || false;
+    const addStudent = options.addStudent !== false;
+
     if (!message) return;
-    
+
     try {
-        // Add student message to UI
-        addMessageToConversation('student', message);
-        input.value = '';
-        
-        // Send to backend
+        if (addStudent) {
+            addMessageToConversation('student', message);
+        }
+        if (input) {
+            input.value = '';
+        }
+
         const response = await apiCall('/session/message', 'POST', {
             session_id: currentSession.sessionId,
-            message: message
+            message: message,
+            voice_mode: voiceMode
         });
-        
-        // Add patient response
-        addMessageToConversation('patient', response.patient_response);
-        
+
+        const patientMessage = addMessageToConversation('patient', response.patient_response, response.audio_base64);
+        if (response.audio_base64) {
+            audioPlayer.playBase64(response.audio_base64, patientMessage.indicator);
+        }
     } catch (error) {
         console.error('Failed to send message:', error);
     }
 }
 
-function addMessageToConversation(speaker, text) {
+function addMessageToConversation(speaker, text, audioBase64 = null) {
     const conversationBox = document.getElementById('conversationBox');
     
     // Remove empty state if present
@@ -177,13 +321,84 @@ function addMessageToConversation(speaker, text) {
     // Create message element
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${speaker}`;
+    const speakerLabel = speaker === 'student' ? 'You' : 'Patient';
+    const audioIndicator = audioBase64
+        ? `
+            <span class="audio-indicator">
+                <span class="speaker-icon">🔊</span>
+                <span class="bars">
+                    <span></span><span></span><span></span>
+                </span>
+                <span class="audio-text">Playing</span>
+            </span>
+        `
+        : '';
+
     messageDiv.innerHTML = `
-        <div class="message-speaker">${speaker === 'student' ? 'You' : 'Patient'}:</div>
+        <div class="message-speaker">${speakerLabel}:${audioIndicator}</div>
         <div>${text}</div>
     `;
     
     conversationBox.appendChild(messageDiv);
     conversationBox.scrollTop = conversationBox.scrollHeight;
+
+    return {
+        element: messageDiv,
+        indicator: messageDiv.querySelector('.audio-indicator')
+    };
+}
+
+async function initializeVoiceControls() {
+    if (voiceControlsInitialized) return;
+    const button = document.getElementById('holdToSpeakButton');
+    const statusEl = document.getElementById('voiceStatus');
+    const waveformEl = document.getElementById('voiceWaveform');
+    const fallbackEl = document.getElementById('voiceFallback');
+
+    if (!button || !statusEl || !waveformEl || !fallbackEl) return;
+
+    voiceRecorder = new VoiceRecorder(button, statusEl, waveformEl, fallbackEl);
+    audioPlayer = new AudioPlayer();
+    await voiceRecorder.init();
+
+    const stopAndSend = async () => {
+        const blob = await voiceRecorder.stop();
+        if (!blob) return;
+        try {
+            const formData = new FormData();
+            formData.append('file', blob, 'history-recording.webm');
+            const result = await apiCallFormData('/voice/transcribe', formData);
+            statusEl.textContent = 'Ready to record';
+            await sendMessage(result.text, { voiceMode: true });
+        } catch (error) {
+            statusEl.textContent = 'Transcription failed. Use text input.';
+            fallbackEl.style.display = 'flex';
+        }
+    };
+
+    button.addEventListener('pointerdown', async (event) => {
+        event.preventDefault();
+        await voiceRecorder.start();
+    });
+
+    button.addEventListener('pointerup', async (event) => {
+        event.preventDefault();
+        await stopAndSend();
+    });
+
+    button.addEventListener('pointerleave', async () => {
+        if (voiceRecorder.isRecording) {
+            await stopAndSend();
+        }
+    });
+
+    button.addEventListener('pointercancel', async () => {
+        if (voiceRecorder.isRecording) {
+            await stopAndSend();
+        }
+    });
+
+    voiceControlsInitialized = true;
 }
 
 // ==========================================
@@ -421,6 +636,18 @@ async function askStaffNurse() {
     if (!message) return;
     
     try {
+        const audioIndicator = (response) => response.audio_base64
+            ? `
+                <span class="audio-indicator">
+                    <span class="speaker-icon">🔊</span>
+                    <span class="bars">
+                        <span></span><span></span><span></span>
+                    </span>
+                    <span class="audio-text">Playing</span>
+                </span>
+            `
+            : '';
+
         const response = await apiCall('/session/staff-nurse', 'POST', {
             session_id: currentSession.sessionId,
             message: message
@@ -434,6 +661,7 @@ async function askStaffNurse() {
             responseDiv.innerHTML = `
                 <div class="verification-response">
                     <strong>Staff Nurse (Verification - Action Recorded):</strong>
+                    ${audioIndicator(response)}
                     <p>${response.staff_nurse_response}</p>
                 </div>
             `;
@@ -451,6 +679,7 @@ async function askStaffNurse() {
             responseDiv.innerHTML = `
                 <div class="info-message">
                     <strong>Staff Nurse:</strong>
+                    ${audioIndicator(response)}
                     <p>${response.staff_nurse_response}</p>
                 </div>
             `;
@@ -458,8 +687,16 @@ async function askStaffNurse() {
             // Regular guidance
             responseDiv.innerHTML = `
                 <strong>Staff Nurse (Guidance):</strong>
+                ${audioIndicator(response)}
                 <p>${response.staff_nurse_response}</p>
             `;
+        }
+
+        if (response.audio_base64) {
+            const indicator = responseDiv.querySelector('.audio-indicator');
+            if (indicator) {
+                audioPlayer.playBase64(response.audio_base64, indicator);
+            }
         }
         
         input.value = '';
@@ -503,6 +740,7 @@ async function finishStep(step) {
 function displayHistoryFeedback(feedback) {
     const modal = document.getElementById('feedbackModal');
     const content = document.getElementById('feedbackContent');
+    const audioControls = document.getElementById('feedbackAudioControls');
     
     let html = `
         <div class="feedback-section">
@@ -537,6 +775,13 @@ function displayHistoryFeedback(feedback) {
     
     content.innerHTML = html;
     modal.style.display = 'flex';
+
+    if (feedback.narrated_feedback?.message_text) {
+        playFeedbackNarration(feedback.narrated_feedback.message_text);
+        audioControls.style.display = 'flex';
+    } else {
+        audioControls.style.display = 'none';
+    }
 }
 
 function displayAssessmentResults(mcqResult) {
@@ -598,6 +843,10 @@ function displayPreparationSummary(summary) {
 
 function closeFeedbackModal() {
     document.getElementById('feedbackModal').style.display = 'none';
+    if (feedbackAudio) {
+        feedbackAudio.pause();
+        feedbackAudio = null;
+    }
 }
 
 function continueToNextStep() {
@@ -648,5 +897,52 @@ function showCompletionScreen() {
 
 document.addEventListener('DOMContentLoaded', () => {
     console.log('VR Nursing Education System - Test UI Loaded (Updated)');
+    if (!audioPlayer) {
+        audioPlayer = new AudioPlayer();
+    }
     showScreen('startScreen');
 });
+
+async function playFeedbackNarration(text) {
+    try {
+        const response = await fetch(`${API_BASE_URL}/voice/synthesize`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ text })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to synthesize feedback');
+        }
+
+        const blob = await response.blob();
+        if (feedbackAudio) {
+            feedbackAudio.pause();
+        }
+        feedbackAudio = new Audio(URL.createObjectURL(blob));
+        feedbackAudio.play().catch((error) => console.error('Feedback audio play failed:', error));
+    } catch (error) {
+        console.error('Feedback narration error:', error);
+    }
+}
+
+function toggleFeedbackAudio() {
+    if (!feedbackAudio) return;
+    const toggleButton = document.getElementById('feedbackAudioToggle');
+    if (feedbackAudio.paused) {
+        feedbackAudio.play().catch((error) => console.error('Feedback audio play failed:', error));
+        toggleButton.textContent = '⏸ Pause';
+    } else {
+        feedbackAudio.pause();
+        toggleButton.textContent = '▶️ Play';
+    }
+}
+
+function replayFeedbackAudio() {
+    if (!feedbackAudio) return;
+    feedbackAudio.currentTime = 0;
+    feedbackAudio.play().catch((error) => console.error('Feedback audio play failed:', error));
+    document.getElementById('feedbackAudioToggle').textContent = '⏸ Pause';
+}

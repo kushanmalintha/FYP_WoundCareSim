@@ -24,7 +24,10 @@ class SynthesizeRequest(BaseModel):
 
 @router.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...)):
-    if file.content_type and file.content_type not in ALLOWED_AUDIO_TYPES:
+    content_type = None
+    if file.content_type:
+        content_type = file.content_type.split(";", 1)[0].strip().lower()
+    if content_type and content_type not in ALLOWED_AUDIO_TYPES:
         raise HTTPException(status_code=400, detail="Unsupported audio format")
 
     try:
@@ -32,7 +35,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
         text = await GroqService.transcribe_audio(
             filename=file.filename or "audio",
             content=content,
-            content_type=file.content_type,
+            content_type=content_type or file.content_type,
         )
         return {"text": text}
     except Exception as exc:

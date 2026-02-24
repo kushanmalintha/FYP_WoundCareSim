@@ -1,5 +1,6 @@
 // Configuration
 const API_BASE_URL = 'http://127.0.0.1:8000';
+const WS_BASE_URL = API_BASE_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 
 // Global State
 let currentSession = {
@@ -9,7 +10,12 @@ let currentSession = {
     nextStep: null,
     scenarioMetadata: null,
     mcqQuestions: [],
-    actionCounter: 0
+    actionCounter: 0,
+    sessionToken: null,
+    ws: null,
+    wsConnected: false,
+    lastSentEvent: '-',
+    lastReceivedEvent: '-'
 };
 
 let mediaRecorder = null;
@@ -17,6 +23,9 @@ let recordedChunks = [];
 let isRecording = false;
 let mediaStream = null;
 let activeRecordingTarget = null;
+let pendingTranscriptionHandler = null;
+let pendingStepTransition = null;
+let feedbackRenderedForStep = false;
 
 // ==========================================
 // Utility Functions
@@ -113,6 +122,217 @@ async function apiCall(endpoint, method = 'GET', body = null) {
 // Session Management
 // ==========================================
 
+function updateDebugPanel() {
+    const statusEl = document.getElementById('wsStatus');
+    const sentEl = document.getElementById('lastSentEvent');
+    const receivedEl = document.getElementById('lastReceivedEvent');
+    if (!statusEl || !sentEl || !receivedEl) return;
+
+    statusEl.textContent = currentSession.wsConnected ? 'Connected' : 'Disconnected';
+    statusEl.className = currentSession.wsConnected ? 'debug-value connected' : 'debug-value disconnected';
+    sentEl.textContent = currentSession.lastSentEvent || '-';
+    receivedEl.textContent = currentSession.lastReceivedEvent || '-';
+}
+
+function getWebSocket() {
+    if (currentSession.ws && currentSession.ws.readyState === WebSocket.OPEN) {
+        return currentSession.ws;
+    }
+    return null;
+}
+
+function canUseWebSocket() {
+    return !!getWebSocket();
+}
+
+function moveToNextStep(nextStep) {
+    currentSession.nextStep = nextStep;
+    continueToNextStep();
+}
+
+function handleTranscription(data) {
+    const transcript = (data.text || '').trim();
+    if (!transcript) return;
+
+    const patientInput = document.getElementById('patientQuestion');
+    const nurseInput = document.getElementById(getStaffNurseInputId());
+
+    if (activeRecordingTarget?.targetType === 'patient' && patientInput) {
+        patientInput.value = transcript;
+    } else if (nurseInput) {
+        nurseInput.value = transcript;
+    }
+
+    if (data.is_final && typeof pendingTranscriptionHandler === 'function') {
+        pendingTranscriptionHandler(transcript);
+        pendingTranscriptionHandler = null;
+    }
+}
+
+function playAudio(base64Audio) {
+    if (!base64Audio) return;
+    const byteCharacters = atob(base64Audio);
+    const byteNumbers = new Array(byteCharacters.length);
+
+    for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+    }
+
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: 'audio/wav' });
+    const audioUrl = URL.createObjectURL(blob);
+
+    const audio = new Audio(audioUrl);
+    audio.play().catch((error) => {
+        console.error('WebSocket audio playback failed:', error);
+    }).finally(() => {
+        setTimeout(() => URL.revokeObjectURL(audioUrl), 1000);
+    });
+}
+
+function displayNurseMessage(text) {
+    const responseId = getStaffNurseResponseId();
+    const responseDiv = document.getElementById(responseId);
+    if (!responseDiv) return;
+    responseDiv.innerHTML = `
+        <strong>Staff Nurse:</strong>
+        <p>${text}</p>
+    `;
+}
+
+
+
+function tryMoveToPendingStep() {
+    if (pendingStepTransition && feedbackRenderedForStep) {
+        moveToNextStep(pendingStepTransition);
+        pendingStepTransition = null;
+        feedbackRenderedForStep = false;
+    }
+}
+
+function handleServerEvent(message) {
+    if (message.type === 'error') {
+        currentSession.lastReceivedEvent = `error: ${message.message}`;
+        updateDebugPanel();
+        console.error('WebSocket error event:', message.message);
+        return;
+    }
+
+    const eventName = message.event || message.type || 'unknown';
+    currentSession.lastReceivedEvent = eventName;
+    updateDebugPanel();
+
+    switch (message.event) {
+        case 'transcription_result':
+            handleTranscription(message.data || {});
+            break;
+        case 'tts_audio':
+            playAudio((message.data || {}).audio_bytes);
+            break;
+        case 'real_time_feedback':
+            displayRealtimeFeedback(message.data || {});
+            break;
+        case 'nurse_message':
+            if ((message.data || {}).text) {
+                const role = (message.data || {}).role;
+                if (role === 'patient') {
+                    addMessageToConversation('patient', message.data.text);
+                } else {
+                    displayNurseMessage(message.data.text);
+                }
+            }
+            break;
+        case 'final_feedback':
+            displayHistoryFeedback(message.data || {}, null);
+            feedbackRenderedForStep = true;
+            tryMoveToPendingStep();
+            break;
+        case 'assessment_summary':
+            displayAssessmentResults((message.data || {}).mcq_result || {}, null);
+            feedbackRenderedForStep = true;
+            tryMoveToPendingStep();
+            break;
+        case 'step_complete': {
+            const nextStep = (message.data || {}).next_step;
+            if (currentSession.currentStep === 'cleaning_and_dressing') {
+                moveToNextStep(nextStep);
+            } else if (feedbackRenderedForStep) {
+                moveToNextStep(nextStep);
+                feedbackRenderedForStep = false;
+            } else {
+                pendingStepTransition = nextStep;
+            }
+            break;
+        }
+        case 'session_end':
+            showCompletionScreen();
+            break;
+        default:
+            break;
+    }
+}
+
+function sendWsEvent(event, data) {
+    const ws = getWebSocket();
+    if (!ws) return false;
+
+    const payload = {
+        type: 'event',
+        event,
+        data: data || {}
+    };
+    ws.send(JSON.stringify(payload));
+    currentSession.lastSentEvent = event;
+    updateDebugPanel();
+    return true;
+}
+
+function connectWebSocket() {
+    if (!currentSession.sessionId || !currentSession.sessionToken) return;
+
+    if (currentSession.ws && [WebSocket.OPEN, WebSocket.CONNECTING].includes(currentSession.ws.readyState)) {
+        return;
+    }
+
+    const wsUrl = `${WS_BASE_URL}/ws/session/${currentSession.sessionId}?token=${encodeURIComponent(currentSession.sessionToken)}`;
+    const ws = new WebSocket(wsUrl);
+    currentSession.ws = ws;
+
+    ws.onopen = () => {
+        currentSession.wsConnected = true;
+        updateDebugPanel();
+        console.log('WebSocket connected');
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            handleServerEvent(JSON.parse(event.data));
+        } catch (error) {
+            console.error('Failed to parse WebSocket message:', error);
+        }
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+    };
+
+    ws.onclose = () => {
+        currentSession.wsConnected = false;
+        updateDebugPanel();
+        console.log('WebSocket disconnected');
+    };
+}
+
+function disconnectWebSocket() {
+    if (currentSession.ws) {
+        currentSession.ws.close();
+    }
+    currentSession.ws = null;
+    currentSession.wsConnected = false;
+    updateDebugPanel();
+}
+
+
 async function startSession() {
     const scenarioId = document.getElementById('scenarioId').value.trim();
     const studentId = document.getElementById('studentId').value.trim();
@@ -130,6 +350,8 @@ async function startSession() {
         
         currentSession.sessionId = response.session_id;
         currentSession.scenarioId = scenarioId;
+        currentSession.sessionToken = response.session_token || null;
+        connectWebSocket();
         
         // Fetch session details
         await loadSessionInfo();
@@ -186,16 +408,20 @@ async function sendMessageText(message) {
     }
 
     try {
-        // Add student message to UI
         addMessageToConversation('student', message);
-        
-        // Send to backend
+
+        if (canUseWebSocket()) {
+            const sent = sendWsEvent('text_message', { text: message });
+            if (sent) {
+                return;
+            }
+        }
+
         const response = await apiCall('/session/message', 'POST', {
             session_id: currentSession.sessionId,
             message: message
         });
-        
-        // Add patient response
+
         addMessageToConversation('patient', response.patient_response);
 
         if (response.patient_audio && response.patient_audio.audio_base64) {
@@ -204,7 +430,7 @@ async function sendMessageText(message) {
                 response.patient_audio.content_type
             );
         }
-        
+
     } catch (error) {
         console.error('Failed to send message:', error);
     }
@@ -232,6 +458,7 @@ async function togglePatientRecording() {
             buttonId: 'recordButton',
             statusId: 'recordingStatus',
             labelText: '🎤 Record Voice',
+            targetType: 'patient',
             onStop: async (blob) => {
                 await sendAudioForTranscription(blob, async (transcript) => {
                     const input = document.getElementById('patientQuestion');
@@ -258,6 +485,7 @@ async function toggleNurseRecording() {
             buttonId: recordingIds.buttonId,
             statusId: recordingIds.statusId,
             labelText: '🎤 Record Nurse Question',
+            targetType: 'nurse',
             onStop: async (blob) => {
                 await sendAudioForTranscription(blob, async (transcript) => {
                     const inputId = getStaffNurseInputId();
@@ -305,6 +533,21 @@ async function startRecording(target) {
     }
 }
 
+
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const result = reader.result || '';
+            const base64 = String(result).split(',')[1] || '';
+            resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
 function stopRecording() {
     if (mediaRecorder && isRecording) {
         mediaRecorder.stop();
@@ -323,6 +566,22 @@ function stopRecording() {
 async function sendAudioForTranscription(audioBlob, onTranscript) {
     showLoading();
     try {
+        if (canUseWebSocket()) {
+            const base64Audio = await blobToBase64(audioBlob);
+            pendingTranscriptionHandler = onTranscript || null;
+            sendWsEvent('stt_chunk', {
+                audio_chunk: base64Audio
+            });
+            const sent = sendWsEvent('stt_complete', {
+                filename: 'stream.webm',
+                content_type: audioBlob.type || 'audio/webm'
+            });
+            if (sent) {
+                return;
+            }
+            pendingTranscriptionHandler = null;
+        }
+
         const formData = new FormData();
         formData.append('file', audioBlob, 'history-audio.webm');
         const response = await fetch(`${API_BASE_URL}/audio/stt`, {
@@ -419,6 +678,13 @@ function loadMCQQuestions() {
 
 async function selectMCQOption(questionId, answer) {
     try {
+        if (canUseWebSocket()) {
+            sendWsEvent('mcq_answer', {
+                question_id: questionId,
+                answer: answer
+            });
+        }
+
         // Submit answer
         const response = await apiCall('/session/mcq-answer', 'POST', {
             session_id: currentSession.sessionId,
@@ -509,6 +775,13 @@ function loadCleaningAndDressingActions() {
 
 async function recordAction(actionType) {
     try {
+        if (canUseWebSocket()) {
+            const sent = sendWsEvent('action_performed', {
+                action_type: actionType
+            });
+            if (sent) return;
+        }
+
         const response = await apiCall('/session/action', 'POST', {
             session_id: currentSession.sessionId,
             action_type: actionType
@@ -637,6 +910,14 @@ async function askStaffNurse(messageOverride) {
     if (!message) return;
     
     try {
+        if (canUseWebSocket() && currentSession.currentStep !== 'history') {
+            const sent = sendWsEvent('text_message', { text: message });
+            if (sent) {
+                input.value = '';
+                return;
+            }
+        }
+
         const response = await apiCall('/session/staff-nurse', 'POST', {
             session_id: currentSession.sessionId,
             message: message
@@ -712,6 +993,15 @@ async function askStaffNurse(messageOverride) {
 
 async function finishStep(step) {
     try {
+        if (canUseWebSocket()) {
+            if (step === 'history' || step === 'assessment') {
+                feedbackRenderedForStep = false;
+                pendingStepTransition = null;
+            }
+            const sent = sendWsEvent('step_complete', { step });
+            if (sent) return;
+        }
+
         const response = await apiCall('/session/step', 'POST', {
             session_id: currentSession.sessionId,
             step: step
@@ -781,6 +1071,10 @@ function displayHistoryFeedback(feedback, feedbackAudio) {
 }
 
 function displayAssessmentResults(mcqResult, summaryAudio) {
+    if (!mcqResult || mcqResult.score === undefined) {
+        return;
+    }
+
     const modal = document.getElementById('feedbackModal');
     const content = document.getElementById('feedbackContent');
     
@@ -894,4 +1188,9 @@ function showCompletionScreen() {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('VR Nursing Education System - Test UI Loaded (Updated)');
     showScreen('startScreen');
+    updateDebugPanel();
+});
+
+window.addEventListener('beforeunload', () => {
+    disconnectWebSocket();
 });

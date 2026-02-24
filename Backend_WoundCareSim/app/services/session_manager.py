@@ -1,6 +1,7 @@
 from app.core.state_machine import Step, next_step
 from typing import Optional, Dict, Any
 from datetime import datetime
+import secrets
 
 from app.services.scenario_loader import load_scenario
 
@@ -34,6 +35,7 @@ class SessionManager:
         self.sessions[session_id] = {
             "scenario_id": scenario_id,
             "student_id": student_id,
+            "session_token": secrets.token_urlsafe(24),
             "current_step": Step.HISTORY.value,
             "last_evaluation": None,
             "scenario_metadata": scenario_metadata,
@@ -49,6 +51,14 @@ class SessionManager:
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         return self.sessions.get(session_id)
+
+    def validate_session_token(self, session_id: str, token: Optional[str]) -> bool:
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+        if not token:
+            return False
+        return secrets.compare_digest(session.get("session_token", ""), token)
 
     # ----------------------------
     # Evaluation & logging

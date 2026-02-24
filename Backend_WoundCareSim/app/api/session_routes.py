@@ -129,7 +129,7 @@ def start_session(payload: StartSessionRequest):
         scenario_id=payload.scenario_id,
         student_id=payload.student_id
     )
-    return {"session_id": session_id}
+    return {"session_id": session_id, "session_token": session_manager.get_session(session_id).get("session_token")}
 
 
 @router.get("/{session_id}")
@@ -149,7 +149,8 @@ def get_session_info(session_id: str):
         "scenario_metadata": session["scenario_metadata"],
         "last_evaluation": session.get("last_evaluation"),
         "created_at": session.get("created_at"),
-        "updated_at": session.get("updated_at")
+        "updated_at": session.get("updated_at"),
+        "session_token": session.get("session_token")
     }
 
 

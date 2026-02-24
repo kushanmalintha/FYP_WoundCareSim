@@ -15,7 +15,10 @@ let currentSession = {
     ws: null,
     wsConnected: false,
     lastSentEvent: '-',
-    lastReceivedEvent: '-'
+    lastReceivedEvent: '-',
+    awaitingStepCompletion: false,
+    feedbackRenderedForPendingStep: false,
+    deferredNextStep: null
 };
 
 let mediaRecorder = null;
@@ -148,6 +151,19 @@ function moveToNextStep(nextStep) {
     continueToNextStep();
 }
 
+function markFeedbackRendered() {
+    if (!currentSession.awaitingStepCompletion) return;
+
+    currentSession.feedbackRenderedForPendingStep = true;
+    if (currentSession.deferredNextStep) {
+        const nextStep = currentSession.deferredNextStep;
+        currentSession.awaitingStepCompletion = false;
+        currentSession.feedbackRenderedForPendingStep = false;
+        currentSession.deferredNextStep = null;
+        moveToNextStep(nextStep);
+    }
+}
+
 function handleTranscription(data) {
     const transcript = (data.text || '').trim();
     if (!transcript) return;
@@ -165,27 +181,6 @@ function handleTranscription(data) {
         pendingTranscriptionHandler(transcript);
         pendingTranscriptionHandler = null;
     }
-}
-
-function playAudio(base64Audio) {
-    if (!base64Audio) return;
-    const byteCharacters = atob(base64Audio);
-    const byteNumbers = new Array(byteCharacters.length);
-
-    for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
-    }
-
-    const byteArray = new Uint8Array(byteNumbers);
-    const blob = new Blob([byteArray], { type: 'audio/wav' });
-    const audioUrl = URL.createObjectURL(blob);
-
-    const audio = new Audio(audioUrl);
-    audio.play().catch((error) => {
-        console.error('WebSocket audio playback failed:', error);
-    }).finally(() => {
-        setTimeout(() => URL.revokeObjectURL(audioUrl), 1000);
-    });
 }
 
 function displayNurseMessage(text) {
@@ -215,7 +210,10 @@ function handleServerEvent(message) {
             handleTranscription(message.data || {});
             break;
         case 'tts_audio':
-            playAudio((message.data || {}).audio_bytes);
+            playAudioFromBase64(
+                (message.data || {}).audio_bytes,
+                (message.data || {}).content_type || 'audio/mpeg'
+            );
             break;
         case 'real_time_feedback':
             displayRealtimeFeedback(message.data || {});
@@ -230,9 +228,38 @@ function handleServerEvent(message) {
                 }
             }
             break;
-        case 'step_complete':
-            moveToNextStep((message.data || {}).next_step);
+        case 'final_feedback':
+            displayHistoryFeedback(message.data || {}, null);
+            markFeedbackRendered();
             break;
+        case 'assessment_summary':
+            displayAssessmentResults(
+                (message.data || {}).mcq_result,
+                null,
+                (message.data || {}).summary_text
+            );
+            markFeedbackRendered();
+            break;
+        case 'step_complete': {
+            const nextStep = (message.data || {}).next_step;
+            if (!currentSession.awaitingStepCompletion) {
+                moveToNextStep(nextStep);
+                break;
+            }
+
+            const pendingStep = currentSession.currentStep;
+            const requiresFeedback = pendingStep === 'history' || pendingStep === 'assessment';
+            if (requiresFeedback && !currentSession.feedbackRenderedForPendingStep) {
+                currentSession.deferredNextStep = nextStep;
+                break;
+            }
+
+            currentSession.awaitingStepCompletion = false;
+            currentSession.feedbackRenderedForPendingStep = false;
+            currentSession.deferredNextStep = null;
+            moveToNextStep(nextStep);
+            break;
+        }
         case 'session_end':
             showCompletionScreen();
             break;
@@ -963,8 +990,13 @@ async function askStaffNurse(messageOverride) {
 async function finishStep(step) {
     try {
         if (canUseWebSocket()) {
+            currentSession.awaitingStepCompletion = true;
+            currentSession.feedbackRenderedForPendingStep = step === 'cleaning_and_dressing';
             const sent = sendWsEvent('step_complete', { step });
             if (sent) return;
+            currentSession.awaitingStepCompletion = false;
+            currentSession.feedbackRenderedForPendingStep = false;
+            currentSession.deferredNextStep = null;
         }
 
         const response = await apiCall('/session/step', 'POST', {
@@ -1035,10 +1067,12 @@ function displayHistoryFeedback(feedback, feedbackAudio) {
     }
 }
 
-function displayAssessmentResults(mcqResult, summaryAudio) {
+function displayAssessmentResults(mcqResult, summaryAudio, summaryText = null) {
     const modal = document.getElementById('feedbackModal');
     const content = document.getElementById('feedbackContent');
     
+    if (!mcqResult) return;
+
     const scorePercent = (mcqResult.score * 100).toFixed(0);
     
     let html = `
@@ -1049,7 +1083,7 @@ function displayAssessmentResults(mcqResult, summaryAudio) {
                     ${mcqResult.correct_count} / ${mcqResult.total_questions}
                 </div>
                 <div class="mcq-summary-text">
-                    ${mcqResult.summary}
+                    ${summaryText || mcqResult.summary}
                 </div>
                 <div class="score-bar">
                     <div class="score-fill" style="width: ${scorePercent}%"></div>

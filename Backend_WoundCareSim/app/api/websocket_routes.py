@@ -10,8 +10,11 @@ from app.api.session_routes import (
     action_event_service,
     audio_service,
     clinical_agent,
+    communication_agent,
     conversation_manager,
+    evaluation_service,
     is_action_already_performed,
+    knowledge_agent,
     patient_agent,
     session_manager,
 )
@@ -49,7 +52,7 @@ async def _send_tts_event(websocket: WebSocket, tts_payload: Optional[Dict[str, 
     await _send_server_event(
         websocket,
         "tts_audio",
-        {"audio_bytes": audio_bytes, "role": role},
+        {"audio_bytes": audio_bytes, "content_type": tts_payload.get("content_type", "audio/mpeg"), "role": role},
     )
 
 
@@ -260,7 +263,106 @@ async def websocket_endpoint(session_id: str, websocket: WebSocket):
                 )
 
             elif event == "step_complete":
+                requested_step = data.get("step")
+                current_step = session.get("current_step")
+
+                if requested_step and requested_step != current_step:
+                    await _send_error(
+                        websocket,
+                        f"Invalid step completion request. Current step is '{current_step}'.",
+                    )
+                    continue
+
+                if current_step == Step.HISTORY.value:
+                    context = await evaluation_service.prepare_agent_context(
+                        session_id=session_id,
+                        step=current_step,
+                    )
+
+                    evaluator_outputs = [
+                        await communication_agent.evaluate(
+                            current_step=current_step,
+                            student_input=context["transcript"],
+                            scenario_metadata=context["scenario_metadata"],
+                            rag_response=context["rag_context"],
+                        ),
+                        await knowledge_agent.evaluate(
+                            current_step=current_step,
+                            student_input=context["transcript"],
+                            scenario_metadata=context["scenario_metadata"],
+                            rag_response=context["rag_context"],
+                        ),
+                    ]
+
+                    evaluation = await evaluation_service.aggregate_evaluations(
+                        session_id=session_id,
+                        evaluator_outputs=evaluator_outputs,
+                        student_mcq_answers=None,
+                        student_message_to_nurse=data.get("user_input"),
+                    )
+
+                    conversation_manager.clear_step(session_id, Step.HISTORY.value)
+
+                    feedback_payload = {
+                        "narrated_feedback": evaluation.get("narrated_feedback"),
+                        "score": evaluation.get("scores", {}).get("step_quality_indicator"),
+                        "interpretation": evaluation.get("scores", {}).get("interpretation"),
+                    }
+                    await _send_server_event(websocket, "final_feedback", feedback_payload)
+
+                    narrated_text = (evaluation.get("narrated_feedback") or {}).get("message_text", "")
+                    await _send_tts_event(
+                        websocket,
+                        await _safe_tts(narrated_text, role="feedback"),
+                        "feedback",
+                    )
+
+                elif current_step == Step.ASSESSMENT.value:
+                    mcq_answers = session.get("mcq_answers", data.get("student_mcq_answers") or {})
+                    evaluation = await evaluation_service.aggregate_evaluations(
+                        session_id=session_id,
+                        evaluator_outputs=[],
+                        student_mcq_answers=mcq_answers,
+                        student_message_to_nurse=data.get("user_input"),
+                    )
+
+                    mcq_result = evaluation.get("mcq_result")
+                    summary_text = None
+                    if mcq_result:
+                        summary_text = (
+                            f"You answered {mcq_result.get('correct_count')} out of "
+                            f"{mcq_result.get('total_questions')} questions correctly."
+                        )
+
+                    await _send_server_event(
+                        websocket,
+                        "assessment_summary",
+                        {
+                            "mcq_result": mcq_result,
+                            "summary_text": summary_text,
+                        },
+                    )
+                    await _send_tts_event(
+                        websocket,
+                        await _safe_tts(summary_text or "", role="assessment_feedback"),
+                        "assessment_feedback",
+                    )
+
+                    session["mcq_answers"] = {}
+
+                elif current_step == Step.CLEANING_AND_DRESSING.value:
+                    session["action_events"] = []
+                    session.pop("cached_rag_guidelines", None)
+
                 next_step = session_manager.advance_step(session_id)
+
+                if next_step == Step.CLEANING_AND_DRESSING.value:
+                    rag_result = await retrieve_with_rag(
+                        query="wound cleaning and dressing preparation steps sequence prerequisites required actions",
+                        scenario_id=session["scenario_id"],
+                    )
+                    session["cached_rag_guidelines"] = rag_result.get("text", "")
+
                 await _send_server_event(websocket, "step_complete", {"next_step": next_step})
                 if next_step == Step.COMPLETED.value:
                     await _send_server_event(websocket, "session_end", {"session_id": session_id})

@@ -768,6 +768,7 @@ async def run_step(payload: StepInput):
             "current_step": current_step,
             "next_step": next_step,
             "mcq_result": mcq_result,
+            "summary_text": summary_text,
             "summary_audio": await _safe_tts(
                 summary_text or "",
                 role="assessment_feedback",
